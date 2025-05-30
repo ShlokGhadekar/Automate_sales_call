@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Matthew-Neural" language="en-US">
+    Hello, this is Morgan from Bitlance. We noticed that you were interested in our products. Do you have a few minutes to chat?
+  </Say>
+  <Pause length="1"/>
+  <Say>Thank you for your time. Have a great day!</Say>
+</Response>
