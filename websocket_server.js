@@ -93,5 +93,8 @@ async function synthesizeSpeech(text) {
   });
   return Buffer.from(res.data);
 }
-
+app.get('/twilio', (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  res.sendFile(__dirname + '/call.xml');
+});
 server.listen(3000, () => console.log('WebSocket server running on port 3000'));
