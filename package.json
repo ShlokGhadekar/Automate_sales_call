@@ -1,7 +1,7 @@
 {
   "name": "ai-voice-agent",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "websocket_server.js",
   "scripts": {
     "start": "node websocket_server.js"
   },
@@ -9,6 +9,8 @@
     "express": "^4.18.2",
     "ws": "^8.13.0",
     "axios": "^1.6.8",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "form-data": "^4.0.0",
+    "wav": "^1.0.2"
   }
 }
