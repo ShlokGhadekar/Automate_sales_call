@@ -6,7 +6,6 @@ const fs = require('fs');
 const FormData = require('form-data');
 const { v4: uuidv4 } = require('uuid');
 
-
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ws' });
@@ -20,52 +19,79 @@ wss.on('connection', (ws) => {
   let audioChunks = [];
 
   ws.on('message', async (message) => {
-    const parsed = JSON.parse(message);
+    let parsed;
+    try {
+      parsed = JSON.parse(message);
+    } catch (e) {
+      console.error('❌ Invalid JSON received:', message);
+      return;
+    }
 
     if (parsed.event === 'start') {
-    console.log('Stream started from Twilio');
-    return;
-  }
-    
+      console.log('🚀 Stream started from Twilio');
+      return;
+    }
+
     if (parsed.event === 'media') {
-    const audioData = Buffer.from(parsed.media.payload, 'base64');
-    audioChunks.push(audioData);
-  }
+      const audioData = Buffer.from(parsed.media.payload, 'base64');
+      audioChunks.push(audioData);
+    }
 
     if (parsed.event === 'stop') {
-  const filename = `./temp/${uuidv4()}.wav`;
-  fs.writeFileSync(filename, Buffer.concat(audioChunks));
-  console.log(`🎧 Saved audio to ${filename}`);
+      const filename = `./temp/${uuidv4()}.wav`;
+      fs.writeFileSync(filename, Buffer.concat(audioChunks));
+      console.log(`🎧 Audio saved: ${filename}`);
 
-  try {
-    const transcript = await transcribeAudio(filename);
-    console.log(`📝 Transcription: ${transcript}`);
+      try {
+        console.log('[STEP] Transcribing audio...');
+        const transcript = await transcribeAudio(filename);
+        console.log(`📝 Transcript: ${transcript || '❌ empty'}`);
 
-    const gptResponse = await generateGPTResponse(transcript);
-    console.log(`🤖 GPT Response: ${gptResponse}`);
+        if (!transcript || transcript.trim().length === 0) throw new Error('Empty transcription');
 
-    const ttsAudio = await synthesizeSpeech(gptResponse);
-    console.log(`🔊 TTS audio ready, sending...`);
+        console.log('[STEP] Generating GPT response...');
+        const gptResponse = await generateGPTResponse(transcript);
+        console.log(`🤖 GPT: ${gptResponse || '❌ empty'}`);
 
-    ws.send(JSON.stringify({
-      event: 'media',
-      media: {
-        payload: ttsAudio.toString('base64')
+        if (!gptResponse || gptResponse.trim().length === 0) throw new Error('Empty GPT response');
+
+        console.log('[STEP] Synthesizing TTS...');
+        const ttsAudio = await synthesizeSpeech(gptResponse);
+
+        if (!ttsAudio || !Buffer.isBuffer(ttsAudio) || ttsAudio.length === 0) {
+          throw new Error('Invalid TTS audio');
+        }
+
+        console.log(`🔊 Sending audio (${ttsAudio.length} bytes)...`);
+        try {
+          ws.send(JSON.stringify({
+            event: 'media',
+            media: {
+              payload: ttsAudio.toString('base64')
+            }
+          }));
+        } catch (sendErr) {
+          console.error('❌ WebSocket send error:', sendErr);
+        }
+
+      } catch (err) {
+        console.error('❌ Pipeline failed:', err.message);
+        try {
+          ws.send(JSON.stringify({
+            event: 'media',
+            media: {
+              payload: Buffer.from('Sorry, something went wrong.').toString('base64')
+            }
+          }));
+        } catch (fallbackErr) {
+          console.error('❌ Could not send fallback:', fallbackErr);
+        }
+        ws.send(JSON.stringify({ event: 'stop', reason: 'internal_error' }));
+      } finally {
+        fs.unlinkSync(filename);
+        audioChunks = [];
       }
-    }));
-  } catch (err) {
-    console.error('❌ Error during pipeline:', err);
-
-    // Inform Twilio stream to stop on error gracefully
-    ws.send(JSON.stringify({
-      event: 'stop',
-      reason: 'internal_error'
-    }));
-  } finally {
-    fs.unlinkSync(filename);
-    audioChunks = [];
-  }
-}
+    }
   });
 });
 
@@ -122,18 +148,18 @@ async function synthesizeSpeech(text) {
   return Buffer.from(res.data);
 }
 
-// XML endpoint for Twilio
+// Twilio XML endpoint
 app.get('/twilio', (req, res) => {
-  res.set('Content-Type', 'text/xml');
+  res.type('text/xml');
   res.sendFile(__dirname + '/call.xml');
 });
 
-// Optional health check
+// Health check
 app.get('/', (req, res) => {
   res.send('✅ AI Voice Agent Server is running');
 });
 
-// Create temp directory if not exists
+// Create temp dir
 if (!fs.existsSync('./temp')) {
   fs.mkdirSync('./temp');
 }
