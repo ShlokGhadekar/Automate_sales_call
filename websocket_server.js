@@ -1,3 +1,5 @@
+// websocket_server.js (real-time interaction enabled)
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -5,7 +7,6 @@ const axios = require('axios');
 const fs = require('fs');
 const FormData = require('form-data');
 const { v4: uuidv4 } = require('uuid');
-const wav = require('wav');  // ✅ Added for proper WAV encoding
 
 const app = express();
 const server = http.createServer(app);
@@ -15,115 +16,108 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const VOICE_ID = process.env.VOICE_ID;
 
+const TEMP_DIR = './temp';
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
+
 wss.on('connection', (ws) => {
   console.log('🔗 WebSocket client connected');
-  let audioChunks = [];
 
-  ws.on('message', async (message) => {
+  let buffer = [];
+  let lastChunkTime = Date.now();
+
+  const INTERVAL = 3000; // every 3 seconds
+  const MIN_AUDIO_LENGTH = 8000; // bytes (around 1 second)
+
+  const processBuffer = async () => {
+    if (buffer.length === 0) return;
+    const chunk = Buffer.concat(buffer);
+    buffer = [];
+
+    if (chunk.length < MIN_AUDIO_LENGTH) return;
+
+    const filename = `${TEMP_DIR}/${uuidv4()}.wav`;
+    fs.writeFileSync(filename, chunk);
+    console.log(`🎧 Processing chunk: ${filename}`);
+
+    try {
+      const transcript = await transcribeAudio(filename);
+      console.log(`📝 Transcript: ${transcript}`);
+
+      if (!transcript.trim()) return;
+
+      const gptReply = await generateGPTResponse(transcript);
+      console.log(`🤖 GPT: ${gptReply}`);
+
+      const ttsAudio = await synthesizeSpeech(gptReply);
+      console.log(`🔊 Sending audio (${ttsAudio.length} bytes)`);
+
+      ws.send(JSON.stringify({
+        event: 'media',
+        media: {
+          payload: ttsAudio.toString('base64')
+        }
+      }));
+    } catch (err) {
+      console.error('❌ Real-time pipeline error:', err.message);
+    } finally {
+      fs.unlinkSync(filename);
+    }
+  };
+
+  const interval = setInterval(() => {
+    if (Date.now() - lastChunkTime > INTERVAL) return;
+    processBuffer();
+  }, INTERVAL);
+
+  ws.on('message', async (msg) => {
     let parsed;
     try {
-      parsed = JSON.parse(message);
-    } catch (e) {
-      console.error('❌ Invalid JSON received:', message);
+      parsed = JSON.parse(msg);
+    } catch (err) {
+      console.error('❌ Bad JSON:', err);
       return;
     }
 
     if (parsed.event === 'start') {
       console.log('🚀 Stream started from Twilio');
-      return;
     }
 
     if (parsed.event === 'media') {
-      const audioData = Buffer.from(parsed.media.payload, 'base64');
-      audioChunks.push(audioData);
+      const chunk = Buffer.from(parsed.media.payload, 'base64');
+      buffer.push(chunk);
+      lastChunkTime = Date.now();
     }
 
     if (parsed.event === 'stop') {
-      const rawBuffer = Buffer.concat(audioChunks);
-      const filename = `./temp/${uuidv4()}.wav`;
-
-      // ✅ Write properly encoded WAV file
-      const fileWriter = new wav.FileWriter(filename, {
-        channels: 1,
-        sampleRate: 16000,
-        bitDepth: 16,
-      });
-
-      fileWriter.write(rawBuffer);
-      fileWriter.end();
-
-      console.log(`🎧 Audio saved: ${filename}`);
-
-      try {
-        console.log('[STEP] Transcribing audio...');
-        const transcript = await transcribeAudio(filename);
-        console.log(`📝 Transcript: ${transcript || '❌ empty'}`);
-
-        if (!transcript || transcript.trim().length === 0) throw new Error('Empty transcription');
-
-        console.log('[STEP] Generating GPT response...');
-        const gptResponse = await generateGPTResponse(transcript);
-        console.log(`🤖 GPT: ${gptResponse || '❌ empty'}`);
-
-        if (!gptResponse || gptResponse.trim().length === 0) throw new Error('Empty GPT response');
-
-        console.log('[STEP] Synthesizing TTS...');
-        const ttsAudio = await synthesizeSpeech(gptResponse);
-
-        if (!ttsAudio || !Buffer.isBuffer(ttsAudio) || ttsAudio.length === 0) {
-          throw new Error('Invalid TTS audio');
-        }
-
-        console.log(`🔊 Sending audio (${ttsAudio.length} bytes)...`);
-        try {
-          ws.send(JSON.stringify({
-            event: 'media',
-            media: {
-              payload: ttsAudio.toString('base64')
-            }
-          }));
-        } catch (sendErr) {
-          console.error('❌ WebSocket send error:', sendErr);
-        }
-
-      } catch (err) {
-        console.error('❌ Pipeline failed:', err.message);
-        try {
-          ws.send(JSON.stringify({
-            event: 'media',
-            media: {
-              payload: Buffer.from('Sorry, something went wrong.').toString('base64')
-            }
-          }));
-        } catch (fallbackErr) {
-          console.error('❌ Could not send fallback:', fallbackErr);
-        }
-        ws.send(JSON.stringify({ event: 'stop', reason: 'internal_error' }));
-      } finally {
-        fs.unlinkSync(filename);
-        audioChunks = [];
-      }
+      console.log('🛑 Stream ended by Twilio');
+      clearInterval(interval);
+      processBuffer();
     }
+  });
+
+  ws.on('close', () => {
+    console.log('❌ WebSocket closed');
+    clearInterval(interval);
   });
 });
 
 // Whisper transcription
 async function transcribeAudio(filePath) {
-  const formData = new FormData();
-  formData.append('file', fs.createReadStream(filePath));
-  formData.append('model', 'whisper-1');
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath));
+  form.append('model', 'whisper-1');
 
-  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+  const res = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
     headers: {
-      ...formData.getHeaders(),
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
-    }
+      ...form.getHeaders(),
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
   });
 
-  return response.data.text;
+  return res.data.text;
 }
 
-// GPT-4 response
+// GPT-4 chat
 async function generateGPTResponse(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4',
@@ -133,7 +127,7 @@ async function generateGPTResponse(text) {
     ]
   }, {
     headers: {
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
+      Authorization: `Bearer ${OPENAI_API_KEY}`
     }
   });
 
@@ -142,40 +136,37 @@ async function generateGPTResponse(text) {
 
 // ElevenLabs TTS
 async function synthesizeSpeech(text) {
-  const res = await axios({
-    method: 'post',
-    url: `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
-    headers: {
-      'xi-api-key': ELEVENLABS_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    responseType: 'arraybuffer',
-    data: {
+  const res = await axios.post(
+    `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
+    {
       text,
       model_id: 'eleven_monolingual_v1',
       voice_settings: { stability: 0.5, similarity_boost: 0.7 }
+    },
+    {
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      responseType: 'arraybuffer'
     }
-  });
+  );
 
   return Buffer.from(res.data);
 }
 
-// Twilio XML endpoint
+// Twilio webhook
 app.all('/twilio', (req, res) => {
   res.type('text/xml');
-  res.sendFile(__dirname + '/call.xml');
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Connecting you to our AI agent now.</Say>
+  <Connect>
+    <Stream url="wss://${req.headers.host}/ws" />
+  </Connect>
+</Response>`);
 });
 
-// Health check
-app.all('/', (req, res) => {
-  res.send('✅ AI Voice Agent Server is running');
-});
+app.get('/', (_, res) => res.send('✅ AI Voice Agent Live'));
 
-// Create temp dir
-if (!fs.existsSync('./temp')) {
-  fs.mkdirSync('./temp');
-}
-
-server.listen(3000, () => {
-  console.log('🚀 WebSocket server running on port 3000');
-});
+server.listen(3000, () => console.log('🚀 WebSocket server running on port 3000'));
