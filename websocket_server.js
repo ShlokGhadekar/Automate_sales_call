@@ -149,13 +149,13 @@ async function synthesizeSpeech(text) {
 }
 
 // Twilio XML endpoint
-app.get('/twilio', (req, res) => {
+app.all('/twilio', (req, res) => {
   res.type('text/xml');
   res.sendFile(__dirname + '/call.xml');
 });
 
 // Health check
-app.get('/', (req, res) => {
+app.all('/', (req, res) => {
   res.send('✅ AI Voice Agent Server is running');
 });
 
