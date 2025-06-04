@@ -2,6 +2,6 @@
 <Response>
   <Say>Connecting you to our AI agent now.</Say>
   <Connect>
-    <Stream url="wss://automatesalescall-production.up.railway.app"/>
+    <Stream url="wss://automatesalescall-production.up.railway.app/ws" />
   </Connect>
 </Response>
