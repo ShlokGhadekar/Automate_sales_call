@@ -22,39 +22,50 @@ wss.on('connection', (ws) => {
   ws.on('message', async (message) => {
     const parsed = JSON.parse(message);
 
+    if (parsed.event === 'start') {
+    console.log('Stream started from Twilio');
+    return;
+  }
+    
     if (parsed.event === 'media') {
-      const audioData = Buffer.from(parsed.media.payload, 'base64');
-      audioChunks.push(audioData);
-    }
+    const audioData = Buffer.from(parsed.media.payload, 'base64');
+    audioChunks.push(audioData);
+  }
 
     if (parsed.event === 'stop') {
-      const filename = `./temp/${uuidv4()}.wav`;
-      fs.writeFileSync(filename, Buffer.concat(audioChunks));
-      console.log(`🎧 Saved audio to ${filename}`);
+  const filename = `./temp/${uuidv4()}.wav`;
+  fs.writeFileSync(filename, Buffer.concat(audioChunks));
+  console.log(`🎧 Saved audio to ${filename}`);
 
-      try {
-        const transcript = await transcribeAudio(filename);
-        console.log(`📝 Transcription: ${transcript}`);
+  try {
+    const transcript = await transcribeAudio(filename);
+    console.log(`📝 Transcription: ${transcript}`);
 
-        const gptResponse = await generateGPTResponse(transcript);
-        console.log(`🤖 GPT Response: ${gptResponse}`);
+    const gptResponse = await generateGPTResponse(transcript);
+    console.log(`🤖 GPT Response: ${gptResponse}`);
 
-        const ttsAudio = await synthesizeSpeech(gptResponse);
-        console.log(`🔊 TTS audio ready, sending...`);
+    const ttsAudio = await synthesizeSpeech(gptResponse);
+    console.log(`🔊 TTS audio ready, sending...`);
 
-        ws.send(JSON.stringify({
-          event: 'media',
-          media: {
-            payload: ttsAudio.toString('base64')
-          }
-        }));
-      } catch (err) {
-        console.error('❌ Error during pipeline:', err);
+    ws.send(JSON.stringify({
+      event: 'media',
+      media: {
+        payload: ttsAudio.toString('base64')
       }
+    }));
+  } catch (err) {
+    console.error('❌ Error during pipeline:', err);
 
-      fs.unlinkSync(filename);
-      audioChunks = [];
-    }
+    // Inform Twilio stream to stop on error gracefully
+    ws.send(JSON.stringify({
+      event: 'stop',
+      reason: 'internal_error'
+    }));
+  } finally {
+    fs.unlinkSync(filename);
+    audioChunks = [];
+  }
+}
   });
 });
 
