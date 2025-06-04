@@ -15,9 +15,53 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const VOICE_ID = process.env.VOICE_ID;
 
+const CHUNK_DURATION_MS = 3000; // 3 seconds
+const SAMPLE_RATE = 16000; // 16 kHz
+const BYTES_PER_SECOND = SAMPLE_RATE * 2; // 16-bit mono = 2 bytes per sample
+const CHUNK_SIZE = (BYTES_PER_SECOND * CHUNK_DURATION_MS) / 1000;
+
 wss.on('connection', (ws) => {
   console.log('🔗 WebSocket client connected');
-  let audioChunks = [];
+  let buffer = Buffer.alloc(0);
+  let interval = null;
+
+  const processChunk = async () => {
+    if (buffer.length < CHUNK_SIZE) return;
+
+    const chunk = buffer.slice(0, CHUNK_SIZE);
+    buffer = buffer.slice(CHUNK_SIZE);
+
+    const filename = `./temp/${uuidv4()}.wav`;
+
+    try {
+      await saveWavFile(chunk, filename);
+      console.log(`🎧 Processing chunk: ${filename}`);
+
+      const transcript = await transcribeAudio(filename);
+      console.log(`📝 Transcript: ${transcript || '❌ empty'}`);
+
+      if (!transcript || transcript.trim().length === 0) return;
+
+      const gptResponse = await generateGPTResponse(transcript);
+      console.log(`🤖 GPT: ${gptResponse || '❌ empty'}`);
+
+      if (!gptResponse || gptResponse.trim().length === 0) return;
+
+      const ttsAudio = await synthesizeSpeech(gptResponse);
+      console.log(`🔊 Sending audio (${ttsAudio.length} bytes)...`);
+
+      ws.send(JSON.stringify({
+        event: 'media',
+        media: {
+          payload: ttsAudio.toString('base64')
+        }
+      }));
+    } catch (err) {
+      console.error('❌ Real-time pipeline error:', err.message);
+    } finally {
+      if (fs.existsSync(filename)) fs.unlinkSync(filename);
+    }
+  };
 
   ws.on('message', async (message) => {
     let parsed;
@@ -30,79 +74,26 @@ wss.on('connection', (ws) => {
 
     if (parsed.event === 'start') {
       console.log('🚀 Stream started from Twilio');
+      interval = setInterval(processChunk, CHUNK_DURATION_MS);
       return;
     }
 
     if (parsed.event === 'media') {
-      // Twilio sends raw 16-bit PCM audio base64 encoded
       const audioData = Buffer.from(parsed.media.payload, 'base64');
-      audioChunks.push(audioData);
+      buffer = Buffer.concat([buffer, audioData]);
       return;
     }
 
     if (parsed.event === 'stop') {
-      // Convert raw PCM audio chunks to WAV buffer
-      const rawBuffer = Buffer.concat(audioChunks);
-      const filename = `./temp/${uuidv4()}.wav`;
-
-      try {
-        await saveWavFile(rawBuffer, filename);
-        console.log(`🎧 Audio saved (WAV): ${filename}`);
-
-        console.log('[STEP] Transcribing audio...');
-        const transcript = await transcribeAudio(filename);
-        console.log(`📝 Transcript: ${transcript || '❌ empty'}`);
-
-        if (!transcript || transcript.trim().length === 0) throw new Error('Empty transcription');
-
-        console.log('[STEP] Generating GPT response...');
-        const gptResponse = await generateGPTResponse(transcript);
-        console.log(`🤖 GPT: ${gptResponse || '❌ empty'}`);
-
-        if (!gptResponse || gptResponse.trim().length === 0) throw new Error('Empty GPT response');
-
-        console.log('[STEP] Synthesizing TTS...');
-        const ttsAudio = await synthesizeSpeech(gptResponse);
-
-        if (!ttsAudio || !Buffer.isBuffer(ttsAudio) || ttsAudio.length === 0) {
-          throw new Error('Invalid TTS audio');
-        }
-
-        console.log(`🔊 Sending audio (${ttsAudio.length} bytes)...`);
-        ws.send(JSON.stringify({
-          event: 'media',
-          media: {
-            payload: ttsAudio.toString('base64')
-          }
-        }));
-
-      } catch (err) {
-        console.error('❌ Pipeline failed:', err.message);
-        try {
-          ws.send(JSON.stringify({
-            event: 'media',
-            media: {
-              payload: Buffer.from('Sorry, something went wrong.').toString('base64')
-            }
-          }));
-        } catch (fallbackErr) {
-          console.error('❌ Could not send fallback:', fallbackErr);
-        }
-        ws.send(JSON.stringify({ event: 'stop', reason: 'internal_error' }));
-      } finally {
-        if (fs.existsSync(filename)) fs.unlinkSync(filename);
-        audioChunks = [];
-      }
+      console.log('🛑 Stream ended by Twilio');
+      clearInterval(interval);
+      interval = null;
+      return;
     }
   });
 });
 
-// Convert raw PCM buffer to WAV file
 async function saveWavFile(rawBuffer, outputPath) {
-  // Twilio audio format: 16-bit signed PCM, 16 kHz, mono
-  const sampleRate = 16000;
-
-  // Convert Buffer of Int16 samples to Float32 array normalized [-1,1]
   const int16Array = new Int16Array(rawBuffer.buffer, rawBuffer.byteOffset, rawBuffer.length / 2);
   const float32Array = new Float32Array(int16Array.length);
   for (let i = 0; i < int16Array.length; i++) {
@@ -110,7 +101,7 @@ async function saveWavFile(rawBuffer, outputPath) {
   }
 
   const audioData = {
-    sampleRate,
+    sampleRate: SAMPLE_RATE,
     channelData: [float32Array]
   };
 
@@ -118,7 +109,6 @@ async function saveWavFile(rawBuffer, outputPath) {
   fs.writeFileSync(outputPath, Buffer.from(wavBuffer));
 }
 
-// Whisper transcription
 async function transcribeAudio(filePath) {
   const formData = new FormData();
   formData.append('file', fs.createReadStream(filePath));
@@ -134,7 +124,6 @@ async function transcribeAudio(filePath) {
   return response.data.text;
 }
 
-// GPT-4 response
 async function generateGPTResponse(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4',
@@ -151,7 +140,6 @@ async function generateGPTResponse(text) {
   return res.data.choices[0].message.content;
 }
 
-// ElevenLabs TTS
 async function synthesizeSpeech(text) {
   const res = await axios({
     method: 'post',
@@ -171,18 +159,15 @@ async function synthesizeSpeech(text) {
   return Buffer.from(res.data);
 }
 
-// Twilio XML endpoint
 app.all('/twilio', (req, res) => {
   res.type('text/xml');
   res.sendFile(__dirname + '/call.xml');
 });
 
-// Health check
 app.all('/', (req, res) => {
   res.send('✅ AI Voice Agent Server is running');
 });
 
-// Create temp dir
 if (!fs.existsSync('./temp')) {
   fs.mkdirSync('./temp');
 }
