@@ -3,66 +3,78 @@ const http = require('http');
 const WebSocket = require('ws');
 const axios = require('axios');
 const fs = require('fs');
+const FormData = require('form-data');
 const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Environment variables or config
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const VOICE_ID = process.env.VOICE_ID;
 
 wss.on('connection', (ws) => {
-  console.log('Client connected');
+  console.log('🔗 WebSocket client connected');
   let audioChunks = [];
 
   ws.on('message', async (message) => {
     const parsed = JSON.parse(message);
 
-    // Handle audio stream
     if (parsed.event === 'media') {
       const audioData = Buffer.from(parsed.media.payload, 'base64');
       audioChunks.push(audioData);
     }
 
-    // On stream end
     if (parsed.event === 'stop') {
       const filename = `./temp/${uuidv4()}.wav`;
       fs.writeFileSync(filename, Buffer.concat(audioChunks));
-      console.log(`Saved audio to ${filename}`);
+      console.log(`🎧 Saved audio to ${filename}`);
 
-      // Step 1: Transcribe with Whisper
-      const transcript = await transcribeAudio(filename);
+      try {
+        const transcript = await transcribeAudio(filename);
+        console.log(`📝 Transcription: ${transcript}`);
 
-      // Step 2: Get GPT response
-      const gptResponse = await generateGPTResponse(transcript);
+        const gptResponse = await generateGPTResponse(transcript);
+        console.log(`🤖 GPT Response: ${gptResponse}`);
 
-      // Step 3: Convert to speech with ElevenLabs
-      const ttsAudio = await synthesizeSpeech(gptResponse);
+        const ttsAudio = await synthesizeSpeech(gptResponse);
+        console.log(`🔊 TTS audio ready, sending...`);
 
-      // Step 4: Send audio back to Twilio (Base64 encoded audio)
-      ws.send(JSON.stringify({ event: 'media', media: { payload: ttsAudio.toString('base64') } }));
+        ws.send(JSON.stringify({
+          event: 'media',
+          media: {
+            payload: ttsAudio.toString('base64')
+          }
+        }));
+      } catch (err) {
+        console.error('❌ Error during pipeline:', err);
+      }
 
-      // Cleanup
       fs.unlinkSync(filename);
       audioChunks = [];
     }
   });
 });
 
+// Whisper transcription
 async function transcribeAudio(filePath) {
-  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions',
-    fs.createReadStream(filePath),
-    {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'multipart/form-data'
-      }
-    });
+  const formData = new FormData();
+  formData.append('file', fs.createReadStream(filePath));
+  formData.append('model', 'whisper-1');
+
+  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+    headers: {
+      ...formData.getHeaders(),
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    }
+  });
+
   return response.data.text;
 }
 
+// GPT-4 response
 async function generateGPTResponse(text) {
   const res = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4',
@@ -71,15 +83,19 @@ async function generateGPTResponse(text) {
       { role: 'user', content: text }
     ]
   }, {
-    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` }
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    }
   });
+
   return res.data.choices[0].message.content;
 }
 
+// ElevenLabs TTS
 async function synthesizeSpeech(text) {
   const res = await axios({
     method: 'post',
-    url: 'https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID',
+    url: `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
     headers: {
       'xi-api-key': ELEVENLABS_API_KEY,
       'Content-Type': 'application/json'
@@ -91,10 +107,26 @@ async function synthesizeSpeech(text) {
       voice_settings: { stability: 0.5, similarity_boost: 0.7 }
     }
   });
+
   return Buffer.from(res.data);
 }
+
+// XML endpoint for Twilio
 app.get('/twilio', (req, res) => {
   res.set('Content-Type', 'text/xml');
   res.sendFile(__dirname + '/call.xml');
 });
-server.listen(3000, () => console.log('WebSocket server running on port 3000'));
+
+// Optional health check
+app.get('/', (req, res) => {
+  res.send('✅ AI Voice Agent Server is running');
+});
+
+// Create temp directory if not exists
+if (!fs.existsSync('./temp')) {
+  fs.mkdirSync('./temp');
+}
+
+server.listen(3000, () => {
+  console.log('🚀 WebSocket server running on port 3000');
+});
