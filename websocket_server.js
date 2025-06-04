@@ -50,12 +50,16 @@ wss.on('connection', (ws) => {
       const ttsAudio = await synthesizeSpeech(gptResponse);
       console.log(`🔊 Sending audio (${ttsAudio.length} bytes)...`);
 
+      const pcmBuffer = await convertToPCM(ttsAudio);
+
       ws.send(JSON.stringify({
         event: 'media',
+        streamSid: streamSid, // required from 'start' event
         media: {
-          payload: ttsAudio.toString('base64')
-        }
-      }));
+        track: 'outbound',
+        payload: pcmBuffer.toString('base64')
+    }
+    }));
     } catch (err) {
       console.error('❌ Real-time pipeline error:', err.message);
     } finally {
@@ -65,6 +69,13 @@ wss.on('connection', (ws) => {
 
   ws.on('message', async (message) => {
     let parsed;
+    let streamSid = null;
+
+    if (parsed.event === 'start') {
+    streamSid = parsed.start.streamSid;
+    console.log('🚀 Stream started from Twilio:', streamSid);
+    return;
+    }
     try {
       parsed = JSON.parse(message);
     } catch (e) {
@@ -122,6 +133,34 @@ async function transcribeAudio(filePath) {
   });
 
   return response.data.text;
+}
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffmpeg = require('fluent-ffmpeg');
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+async function convertToPCM(inputBuffer) {
+  const inputPath = `./temp/${uuidv4()}.mp3`;
+  const outputPath = `./temp/${uuidv4()}.raw`;
+
+  fs.writeFileSync(inputPath, inputBuffer);
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioFrequency(16000)
+      .audioChannels(1)
+      .audioCodec('pcm_s16le')
+      .format('s16le')
+      .save(outputPath)
+      .on('end', () => {
+        const pcmData = fs.readFileSync(outputPath);
+        fs.unlinkSync(inputPath);
+        fs.unlinkSync(outputPath);
+        resolve(pcmData);
+      })
+      .on('error', (err) => {
+        reject(err);
+      });
+  });
 }
 
 async function generateGPTResponse(text) {
