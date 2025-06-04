@@ -5,6 +5,7 @@ const axios = require('axios');
 const fs = require('fs');
 const FormData = require('form-data');
 const { v4: uuidv4 } = require('uuid');
+const wav = require('wav');  // ✅ Added for proper WAV encoding
 
 const app = express();
 const server = http.createServer(app);
@@ -38,8 +39,19 @@ wss.on('connection', (ws) => {
     }
 
     if (parsed.event === 'stop') {
+      const rawBuffer = Buffer.concat(audioChunks);
       const filename = `./temp/${uuidv4()}.wav`;
-      fs.writeFileSync(filename, Buffer.concat(audioChunks));
+
+      // ✅ Write properly encoded WAV file
+      const fileWriter = new wav.FileWriter(filename, {
+        channels: 1,
+        sampleRate: 16000,
+        bitDepth: 16,
+      });
+
+      fileWriter.write(rawBuffer);
+      fileWriter.end();
+
       console.log(`🎧 Audio saved: ${filename}`);
 
       try {
