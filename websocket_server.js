@@ -5,7 +5,7 @@ const axios = require('axios');
 const fs = require('fs');
 const FormData = require('form-data');
 const { v4: uuidv4 } = require('uuid');
-require('dotenv').config();
+
 
 const app = express();
 const server = http.createServer(app);
