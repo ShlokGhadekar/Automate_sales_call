@@ -1,7 +1,9 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Connecting you to our AI agent now.</Say>
   <Connect>
-    <Stream url="wss://automatesalescall-production.up.railway.app/ws" />
+    <Stream url="wss://automatesalescall-production.up.railway.app/ws">
+      <Parameter name="track" value="inbound"/>
+      <Parameter name="content-type" value="audio/l16;rate=16000"/>
+    </Stream>
   </Connect>
 </Response>
